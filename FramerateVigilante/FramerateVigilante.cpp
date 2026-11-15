@@ -140,6 +140,29 @@ void* __fastcall CreateFxSystemPerFrame(void* fxManager, int, uint32_t a1, uint3
 	return ((void*(__thiscall*)(void*, uint32_t, uint32_t, uint32_t, uint32_t))0x4A9BE0)(fxManager, a1, a2, a3, a4);
 }
 
+// Primorsk (SA:MP): состояние гудка для SirenTurnOnFix хранится на каждую машину.
+// У автора оно было общим (static) на все машины: в SA:MP код управления выполняется и для машин других
+// игроков, и чужая машина «съедала» нажатие (issue #13: сирена переключалась не у той машины).
+struct HornState
+{
+	void* vehicle;
+	unsigned int pressTime;
+	bool pressed;
+	bool justUp;
+};
+static HornState hornStates[16] = {};
+static unsigned int hornStateNext = 0;
+
+static HornState& GetHornState(void* vehicle)
+{
+	for (auto& state : hornStates) {
+		if (state.vehicle == vehicle) return state;
+	}
+	HornState& state = hornStates[hornStateNext++ % 16];
+	state = { vehicle, 0, false, false };
+	return state;
+}
+
 /////////////////////////////////////
 
 class FramerateVigilante
@@ -165,6 +188,20 @@ public:
 	};
 	static inline AutoLimitFPS autoLimitFPS;
 
+	// Primorsk (SA:MP): каждое исправление выключается в [Fixes] ini; ключа нет — включено, как у автора.
+	static inline bool fixSwingDoors = true;
+	static inline bool fixAimingRifleWalk = true;
+	static inline bool fixSwim = true;
+	static inline bool fixBuoyancy = true;
+	static inline bool fixSwimEffects = true;
+	static inline bool fixSkimmer = true;
+	static inline bool fixWheelSpin = true;
+	static inline bool fixBurnout = true;
+	static inline bool fixCarSlowDown = true;
+	static inline bool fixSiren = true;
+	static inline bool fixHeliRotor = true;
+	static inline bool fixPedPushCar = true;
+
 	FramerateVigilante()
 	{
 		/////////////////////////////////////
@@ -185,6 +222,19 @@ public:
 		autoLimitFPS.flags.forCutscenes = ini.ReadInteger("AutoLimitFPS", "ForCutscenes", 1);
 		autoLimitFPS.flags.forScriptedCutscenes = ini.ReadInteger("AutoLimitFPS", "ForScriptedCutscenes", 1);
 		autoLimitFPS.flags.forPauseMenu = ini.ReadInteger("AutoLimitFPS", "ForPauseMenu", 1);
+
+		fixSwingDoors = ini.ReadInteger("Fixes", "SwingDoors", 1) != 0;
+		fixAimingRifleWalk = ini.ReadInteger("Fixes", "AimingRifleWalk", 1) != 0;
+		fixSwim = ini.ReadInteger("Fixes", "Swim", 1) != 0;
+		fixBuoyancy = ini.ReadInteger("Fixes", "Buoyancy", 1) != 0;
+		fixSwimEffects = ini.ReadInteger("Fixes", "SwimEffects", 1) != 0;
+		fixSkimmer = ini.ReadInteger("Fixes", "Skimmer", 1) != 0;
+		fixWheelSpin = ini.ReadInteger("Fixes", "WheelSpin", 1) != 0;
+		fixBurnout = ini.ReadInteger("Fixes", "Burnout", 1) != 0;
+		fixCarSlowDown = ini.ReadInteger("Fixes", "CarSlowDown", 1) != 0;
+		fixSiren = ini.ReadInteger("Fixes", "Siren", 1) != 0;
+		fixHeliRotor = ini.ReadInteger("Fixes", "HeliRotor", 1) != 0;
+		fixPedPushCar = ini.ReadInteger("Fixes", "PedPushCar", 1) != 0;
 
 		// Run after. It fixes problems such as installing f92la in modloader while using handling patch.
 		Events::initRwEvent += [] {
@@ -226,11 +276,13 @@ public:
 		#if defined(GTASA)
 
 			// Swing Door (mainly CDoor::Process) fixes
-			MakeJMP(0x6F4422, asm_SwingCompAdd, true);
-			MakeJMP(0x6F43A1, asm_SwingCompDampingA, true); // firela
-			MakeJMP(0x6F43CA, asm_SwingCompDampingB, true); // m_nDirn & 0x20
-			MakeJMP(0x6F4391, asm_SwingCompDampingC, true); // boat
-			MakeJMP(0x6F43D2, asm_SwingCompDampingD, true); // other
+			if (fixSwingDoors) {
+				MakeJMP(0x6F4422, asm_SwingCompAdd, true);
+				MakeJMP(0x6F43A1, asm_SwingCompDampingA, true); // firela
+				MakeJMP(0x6F43CA, asm_SwingCompDampingB, true); // m_nDirn & 0x20
+				MakeJMP(0x6F4391, asm_SwingCompDampingC, true); // boat
+				MakeJMP(0x6F43D2, asm_SwingCompDampingD, true); // other
+			}
 
 			struct AimingRifleWalkFix
 			{
@@ -238,7 +290,7 @@ public:
 				{
 					asm_fmul(0.07f / (CTimer::ms_fTimeStep / normalizer));
 				}
-			}; MakeInline<AimingRifleWalkFix>(0x61E0CA, 0x61E0CA + 6);
+			}; if (fixAimingRifleWalk) MakeInline<AimingRifleWalkFix>(0x61E0CA, 0x61E0CA + 6);
 
 
 			// CTaskSimpleSwim::ProcessSwimmingResistance fixes
@@ -258,7 +310,7 @@ public:
 					asm_fmul(f);
 					asm_fld_st2();
 				}
-			}; MakeInline<SwimSpeedFix>(0x68A50E, 0x68A50E + 6);
+			}; if (fixSwim) MakeInline<SwimSpeedFix>(0x68A50E, 0x68A50E + 6);
 
 
 			// cBuoyancy::CalcBuoyancyForce: buoyancy is cut when mass * m_vecMoveSpeed.z > force * 4.0, but force is per frame (* ms_fTimeStep) and momentum isn't,
@@ -269,16 +321,18 @@ public:
 				{
 					asm_fmul(4.0f / (CTimer::ms_fTimeStep / normalizer));
 				}
-			}; MakeInline<BuoyancyCutoffFix>(0x6C27C2, 0x6C27C2 + 6);
+			}; if (fixBuoyancy) MakeInline<BuoyancyCutoffFix>(0x6C27C2, 0x6C27C2 + 6);
 
 
 			// CTaskSimpleSwim::ProcessEffects emits every frame
-			MakeCALL(0x68ADE2, AddParticlePerFrame, true); // surface sprint wake
-			MakeCALL(0x68AD31, AddParticlePerFrame, true); // underwater bubbles
-			MakeCALL(0x68AEBA, CreateFxSystemPerFrame, true); // sprinting "water_swim" splashes on 4 bones (+ its audio event)
-			MakeCALL(0x68AF15, CreateFxSystemPerFrame, true);
-			MakeCALL(0x68AF66, CreateFxSystemPerFrame, true);
-			MakeCALL(0x68AFB3, CreateFxSystemPerFrame, true);
+			if (fixSwimEffects) {
+				MakeCALL(0x68ADE2, AddParticlePerFrame, true); // surface sprint wake
+				MakeCALL(0x68AD31, AddParticlePerFrame, true); // underwater bubbles
+				MakeCALL(0x68AEBA, CreateFxSystemPerFrame, true); // sprinting "water_swim" splashes on 4 bones (+ its audio event)
+				MakeCALL(0x68AF15, CreateFxSystemPerFrame, true);
+				MakeCALL(0x68AF66, CreateFxSystemPerFrame, true);
+				MakeCALL(0x68AFB3, CreateFxSystemPerFrame, true);
+			}
 
 
 			// Dive z is a constant speed (anim progress * -0.1), cancel SwimSpeedFix scaling
@@ -289,7 +343,7 @@ public:
 					float f = -0.1f * (CTimer::ms_fTimeStep / normalizer);
 					asm_fmul(f);
 				}
-			}; MakeInline<DiveFix>(0x68A42B, 0x68A42B + 6);
+			}; if (fixSwim) MakeInline<DiveFix>(0x68A42B, 0x68A42B + 6);
 
 
 			// Underwater sprint z: anim part is scaled by SwimSpeedFix, the +0.01 come-to-surface speed must not be
@@ -299,7 +353,7 @@ public:
 				{
 					asm_fadd(0.01f * (CTimer::ms_fTimeStep / normalizer));
 				}
-			}; MakeInline<DiveSprintComeToSurfaceFix>(0x68A4CA, 0x68A4CA + 6);
+			}; if (fixSwim) MakeInline<DiveSprintComeToSurfaceFix>(0x68A4CA, 0x68A4CA + 6);
 
 
 			// Surface hold: velocity towards water level is clamped to ms_fTimeStep * 0.1, make it the 30 fps value
@@ -309,7 +363,7 @@ public:
 				{
 					asm_fld(normalizer); // * 0.1 by original code
 				}
-			}; MakeInline<SwimSurfaceSpeedLimitFix>(0x68A7E6, 0x68A7E6 + 6);
+			}; if (fixSwim) MakeInline<SwimSurfaceSpeedLimitFix>(0x68A7E6, 0x68A7E6 + 6);
 
 
 			// Dive pitch rate damping (*= 0.95 per frame)
@@ -320,9 +374,11 @@ public:
 					asm_fmul(powf(0.95f, CTimer::ms_fTimeStep / normalizer));
 				}
 			};
-			MakeInline<SwimPitchDampingFix>(0x68A6BD, 0x68A6BD + 6);
-			MakeInline<SwimPitchDampingFix>(0x68A735, 0x68A735 + 6);
-			MakeInline<SwimPitchDampingFix>(0x68A7BD, 0x68A7BD + 6);
+			if (fixSwim) {
+				MakeInline<SwimPitchDampingFix>(0x68A6BD, 0x68A6BD + 6);
+				MakeInline<SwimPitchDampingFix>(0x68A735, 0x68A735 + 6);
+				MakeInline<SwimPitchDampingFix>(0x68A7BD, 0x68A7BD + 6);
+			}
 
 			struct SkimmerResistanceFix
 			{
@@ -331,7 +387,7 @@ public:
 					float f = 30.0f * (CTimer::ms_fTimeStep / normalizer);
 					asm_fmul(f);
 				}
-			}; MakeInline<SkimmerResistanceFix>(0x6D2771, 0x6D2771 + 6);
+			}; if (fixSkimmer) MakeInline<SkimmerResistanceFix>(0x6D2771, 0x6D2771 + 6);
 
 		#endif // defined(GTASA)
 
@@ -356,7 +412,7 @@ public:
 					asm_fmul(CTimer::ms_fTimeStep);
 					asm_fadd(*(float*)(regs.esi + 0x828));
 				}
-			}; MakeInline<CarWheelOnRailsSpinFix1>(0x6B523F, 0x6B523F + 6);
+			}; if (fixWheelSpin) MakeInline<CarWheelOnRailsSpinFix1>(0x6B523F, 0x6B523F + 6);
 
 			struct CarWheelOnRailsSpinFix2
 			{
@@ -365,7 +421,7 @@ public:
 					asm_fmul(CTimer::ms_fTimeStep);
 					asm_fadd(*(float*)(regs.esi + 0x82C));
 				}
-			}; MakeInline<CarWheelOnRailsSpinFix2>(0x6B524F, 0x6B524F + 6);
+			}; if (fixWheelSpin) MakeInline<CarWheelOnRailsSpinFix2>(0x6B524F, 0x6B524F + 6);
 
 			struct CarWheelOnRailsSpinFix3
 			{
@@ -374,7 +430,7 @@ public:
 					asm_fmul(CTimer::ms_fTimeStep);
 					asm_fadd(*(float*)(regs.esi + 0x830));
 				}
-			}; MakeInline<CarWheelOnRailsSpinFix3>(0x6B525D, 0x6B525D + 6);
+			}; if (fixWheelSpin) MakeInline<CarWheelOnRailsSpinFix3>(0x6B525D, 0x6B525D + 6);
 
 			struct CarWheelOnRailsSpinFix4
 			{
@@ -383,7 +439,7 @@ public:
 					asm_fmul(CTimer::ms_fTimeStep);
 					asm_fadd(*(float*)(regs.esi + 0x834));
 				}
-			}; MakeInline<CarWheelOnRailsSpinFix4>(0x6B5269, 0x6B5269 + 6);
+			}; if (fixWheelSpin) MakeInline<CarWheelOnRailsSpinFix4>(0x6B5269, 0x6B5269 + 6);
 
 		#endif // defined(GTASA)
 
@@ -408,7 +464,7 @@ public:
 					asm_fld(f);
 				}
 			};
-			MakeInline<BurnoutFix>(0x6A4FE6, 0x6A4FE6 + 6);
+			if (fixBurnout) MakeInline<BurnoutFix>(0x6A4FE6, 0x6A4FE6 + 6);
 		#endif defined(GTASA)
 
 			struct CarSlowDownSpeedFix
@@ -431,11 +487,13 @@ public:
 
 
 		#if defined(GTASA)
-			MakeInline<CarSlowDownSpeedFix>(0x6D6E69, 0x6D6E69 + 6);
-			MakeInline<CarSlowDownSpeedFix>(0x6D6EA8, 0x6D6EA8 + 6);
-			MakeInline<CarSlowDownSpeedFix>(0x6D767F, 0x6D767F + 6);
-			MakeInline<CarSlowDownSpeedFix>(0x6D76AB, 0x6D76AB + 6);
-			MakeInline<CarSlowDownSpeedFix>(0x6D76CD, 0x6D76CD + 6);
+			if (fixCarSlowDown) {
+				MakeInline<CarSlowDownSpeedFix>(0x6D6E69, 0x6D6E69 + 6);
+				MakeInline<CarSlowDownSpeedFix>(0x6D6EA8, 0x6D6EA8 + 6);
+				MakeInline<CarSlowDownSpeedFix>(0x6D767F, 0x6D767F + 6);
+				MakeInline<CarSlowDownSpeedFix>(0x6D76AB, 0x6D76AB + 6);
+				MakeInline<CarSlowDownSpeedFix>(0x6D76CD, 0x6D76CD + 6);
+			}
 		#endif
 
 		#if defined(GTAVC)
@@ -455,10 +513,6 @@ public:
 		#endif
 
 
-			static unsigned int hornPressLastTime = 0;
-			static bool hornHasPressed = false;
-			static bool hornJustUp = false;
-
 			struct SirenTurnOnFix
 			{
 				void operator()(reg_pack& regs)
@@ -473,17 +527,18 @@ public:
 					pad = CPad::GetPad(0);
 				#endif
 
-					// Store horn state
+					// Store horn state (Primorsk: per vehicle)
+					HornState& horn = GetHornState(vehicle);
 					if (pad->HornJustDown()) {
-						hornPressLastTime = CTimer::m_snTimeInMilliseconds;
-						hornHasPressed = true;
+						horn.pressTime = CTimer::m_snTimeInMilliseconds;
+						horn.pressed = true;
 					}
-					if (!pad->GetHorn()) { hornJustUp = hornHasPressed ? true : false; }
-					else { hornJustUp = false; }
+					if (!pad->GetHorn()) { horn.justUp = horn.pressed; }
+					else { horn.justUp = false; }
 
 					// Select final mode
 					uint32_t returnAddress;
-					if (pad->GetHorn() && CTimer::m_snTimeInMilliseconds - hornPressLastTime >= 150) {
+					if (pad->GetHorn() && CTimer::m_snTimeInMilliseconds - horn.pressTime >= 150) {
 						// horn return
 					#if defined(GTASA)
 						returnAddress = 0x6E09E8;
@@ -495,9 +550,9 @@ public:
 						returnAddress = 0x534169;
 					#endif
 					}
-					else if (hornJustUp && CTimer::m_snTimeInMilliseconds - hornPressLastTime < 150) {
-						hornJustUp = false;
-						hornHasPressed = false;
+					else if (horn.justUp && CTimer::m_snTimeInMilliseconds - horn.pressTime < 150) {
+						horn.justUp = false;
+						horn.pressed = false;
 						// toggle siren return
 					#if defined(GTASA)
 						returnAddress = 0x6E0999;
@@ -525,7 +580,7 @@ public:
 				}
 			};
 		#if defined(GTASA)
-			MakeInline<SirenTurnOnFix>(0x006E0961);
+			if (fixSiren) MakeInline<SirenTurnOnFix>(0x006E0961);
 		#endif
 		#if defined(GTAVC)
 			MakeInline<SirenTurnOnFix>(0x00597A58);
@@ -544,7 +599,7 @@ public:
 					float f = ((*rotorFinalSpeed / 220.0f) * 3.0f) * (CTimer::ms_fTimeStep / normalizer);
 					asm_fadd(f);
 				}
-			}; MakeInline<HeliRotorIncreaseSpeedA>(0x6C4F37, 0x6C4F37 + 6);
+			}; if (fixHeliRotor) MakeInline<HeliRotorIncreaseSpeedA>(0x6C4F37, 0x6C4F37 + 6);
 
 
 			struct HeliRotorIncreaseSpeedB
@@ -555,7 +610,7 @@ public:
 					float f = (*rotorFinalSpeed / 220.0f) * (CTimer::ms_fTimeStep / normalizer);
 					asm_fadd(f);
 				}
-			}; MakeInline<HeliRotorIncreaseSpeedB>(0x6C4F29, 0x6C4F29 + 6);
+			}; if (fixHeliRotor) MakeInline<HeliRotorIncreaseSpeedB>(0x6C4F29, 0x6C4F29 + 6);
 		#endif
 
 
@@ -592,7 +647,7 @@ public:
 					regs.edx = *(uint32_t*)(regs.esp + 0xB0 - 0x90 + 0x0); //mov     eax, [esp+0B0h+out_result.y]
 					regs.eax = *(uint32_t*)(regs.esp + 0xB0 - 0x90 + 0x4); //mov     eax, [esp+0B0h+out_result.y]
 				}
-			}; MakeInline<PedPushCarForce>(0x549652, 0x549652 + 8);
+			}; if (fixPedPushCar) MakeInline<PedPushCarForce>(0x549652, 0x549652 + 8);
 		#endif
 
 		#if defined(GTASA)

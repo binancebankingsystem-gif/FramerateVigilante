@@ -1,0 +1,93 @@
+name: Primorsk FramerateVigilante build
+
+# Сборка FramerateVigilante.SA.asi для Primorsk Online (SA:MP 0.3.7-R5 / 0.3.DL).
+# Исходник — этот форк (ветка primorsk-samp): выключатели исправлений в [Fixes] и состояние гудка на машину.
+# plugin-sdk (Zlib) — на зафиксированном коммите, собирается тем же компилятором, что и плагин (LTO).
+on:
+  workflow_dispatch:
+  push:
+    branches: [primorsk-samp]
+
+permissions:
+  contents: read
+
+env:
+  PLUGIN_SDK_REF: 15f15b60bbf74c106e1b496ff92c98764abf4605 # DK22Pac/plugin-sdk, 2026-09-08 "SA fix renderware"
+
+jobs:
+  build:
+    runs-on: windows-2025-vs2026
+    steps:
+      - name: Checkout FramerateVigilante
+        uses: actions/checkout@v4
+        with:
+          path: fv
+
+      - name: Checkout plugin-sdk (pinned)
+        uses: actions/checkout@v4
+        with:
+          repository: DK22Pac/plugin-sdk
+          ref: ${{ env.PLUGIN_SDK_REF }}
+          path: plugin-sdk
+          submodules: recursive
+
+      - name: Setup msbuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Generate plugin-sdk solution (premake5)
+        shell: cmd
+        run: |
+          set PLUGIN_SDK_DIR=%GITHUB_WORKSPACE%\plugin-sdk
+          "%PLUGIN_SDK_DIR%\tools\premake\premake5.exe" vs2026 --file="%PLUGIN_SDK_DIR%\tools\premake\premake5.lua"
+
+      - name: Build plugin_sa (Release)
+        shell: cmd
+        working-directory: plugin-sdk
+        run: |
+          set PLUGIN_SDK_DIR=%GITHUB_WORKSPACE%\plugin-sdk
+          for %%S in (plugin.slnx plugin.sln) do if exist %%S (
+            msbuild %%S /p:Configuration=Release /p:Platform="Mixed Platforms" /t:plugin_sa /m /verbosity:minimal || exit /b 1
+            goto built
+          )
+          echo plugin solution not found & exit /b 1
+          :built
+          dir output\lib
+
+      - name: Build FramerateVigilante (GTASA Release|Win32)
+        shell: pwsh
+        run: |
+          $sdk = Join-Path $env:GITHUB_WORKSPACE 'plugin-sdk'
+          $env:PLUGIN_SDK_DIR = $sdk
+          # Тот же набор инструментов, что у собранной plugin.lib (LTO требует одной версии компилятора).
+          $proj = Get-ChildItem $sdk -Recurse -Filter 'plugin_sa.vcxproj' | Select-Object -First 1
+          $toolset = ([xml](Get-Content $proj.FullName)).Project.PropertyGroup.PlatformToolset | Where-Object { $_ } | Select-Object -First 1
+          if (-not $toolset) { throw 'PlatformToolset of plugin_sa not found' }
+          Write-Output "plugin_sa: $($proj.FullName), toolset $toolset"
+          $out = Join-Path $env:GITHUB_WORKSPACE 'out\'
+          msbuild fv\FramerateVigilante\FramerateVigilante.vcxproj `
+            "/p:Configuration=GTASA Release" /p:Platform=Win32 `
+            "/p:PlatformToolset=$toolset" "/p:OutDir=$out" "/p:PLUGIN_SDK_DIR=$sdk\" `
+            /m /verbosity:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Package and hash
+        shell: pwsh
+        run: |
+          $pkg = Join-Path $env:GITHUB_WORKSPACE 'package'
+          New-Item -ItemType Directory -Force (Join-Path $pkg 'primorsk-licenses') | Out-Null
+          Copy-Item out\FramerateVigilante.SA.asi $pkg
+          Copy-Item fv\LICENSE (Join-Path $pkg 'primorsk-licenses\FramerateVigilante-LICENSE.txt')
+          Copy-Item fv\FramerateVigilante\IniReader\LICENSE.txt (Join-Path $pkg 'primorsk-licenses\FramerateVigilante-IniReader-LICENSE.txt')
+          Copy-Item plugin-sdk\LICENSE (Join-Path $pkg 'primorsk-licenses\plugin-sdk-LICENSE.txt')
+          $hash = (Get-FileHash (Join-Path $pkg 'FramerateVigilante.SA.asi') -Algorithm SHA256).Hash.ToLower()
+          $size = (Get-Item (Join-Path $pkg 'FramerateVigilante.SA.asi')).Length
+          $line = "FramerateVigilante.SA.asi sha256=$hash size=$size fv=$env:GITHUB_SHA plugin-sdk=$env:PLUGIN_SDK_REF"
+          Write-Output $line
+          $line | Out-File (Join-Path $pkg 'SHA256.txt') -Encoding ascii
+          "### $line" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FramerateVigilante-SA-primorsk
+          path: package/
